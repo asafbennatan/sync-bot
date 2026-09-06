@@ -115,18 +115,9 @@ func stackLinkRef(branch stackBranch) string {
 	return branch.Name
 }
 
-func stackLinkArgs(view stackView, newBranch string) []string {
-	args := make([]string, 0, len(view.Branches)+1)
-	for _, branch := range view.Branches {
-		args = append(args, stackLinkRef(branch))
-	}
-	args = append(args, newBranch)
-	return args
-}
-
-func submitStack(targetRemote, stackLayerBranch, returnBranch string) error {
-	if stackLayerBranch == "" {
-		return fmt.Errorf("no stack layer branch to submit from")
+func adoptAndSubmitStack(targetRemote, stackLayerBranch, newBranch string) error {
+	if stackLayerBranch == "" || newBranch == "" {
+		return fmt.Errorf("stack layer and branch name are required")
 	}
 
 	originalBranch, _ := runCmd("git", "rev-parse", "--abbrev-ref", "HEAD")
@@ -135,17 +126,29 @@ func submitStack(targetRemote, stackLayerBranch, returnBranch string) error {
 		return fmt.Errorf("failed to checkout stack layer %q: %w", stackLayerBranch, err)
 	}
 
-	_, err := runCmd("gh", "stack", "submit", "--auto", "--remote", targetRemote)
-
-	if returnBranch != "" && returnBranch != "HEAD" {
-		runCmd("git", "checkout", returnBranch)
-		return err
+	view, err := loadStackView()
+	alreadyTracked := err == nil
+	if alreadyTracked {
+		_, alreadyTracked = findStackLayer(view, newBranch)
 	}
-	if originalBranch != "" && originalBranch != "HEAD" {
-		runCmd("git", "checkout", originalBranch)
+	if !alreadyTracked {
+		if _, err := runCmd("gh", "stack", "add", newBranch); err != nil {
+			restoreGitHEAD("", originalBranch)
+			return fmt.Errorf("failed to add branch to gh stack: %w", err)
+		}
+		fmt.Printf("Added '%s' to local gh stack\n", newBranch)
 	}
 
-	return err
+	if _, err := runCmd("git", "checkout", newBranch); err != nil {
+		restoreGitHEAD("", originalBranch)
+		return fmt.Errorf("failed to checkout %q: %w", newBranch, err)
+	}
+
+	if _, err := runCmd("gh", "stack", "submit", "--auto", "--remote", targetRemote); err != nil {
+		return fmt.Errorf("failed to submit gh stack: %w", err)
+	}
+
+	return nil
 }
 
 func resolveRebaseTarget(remote, branch string) (string, error) {

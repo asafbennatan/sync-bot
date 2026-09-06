@@ -174,20 +174,13 @@ func syncAndRewrite(cfg Config) {
 		log.Fatalf("Failed to push branch: %v", err)
 	}
 
-	// 6. Link into gh stack when the bot branch forked from a stack layer
+	// 6. Adopt into gh stack when the bot branch forked from a stack layer
 	if onStack {
-		linkArgs := stackLinkArgs(stackView, cfg.MyBranch)
-		fmt.Printf("\nLinking '%s' on top of stack layer %s...\n", cfg.MyBranch, stackLinkRef(stackLayer))
-		ghArgs := append([]string{"stack", "link", "--remote", targetRemote}, linkArgs...)
-		if _, err := runCmd("gh", ghArgs...); err != nil {
-			log.Fatalf("Failed to link branch into gh stack: %v", err)
+		fmt.Printf("\nAdding '%s' on top of stack layer %s...\n", cfg.MyBranch, stackLayer.Name)
+		if err := adoptAndSubmitStack(targetRemote, stackLayer.Name, cfg.MyBranch); err != nil {
+			log.Fatalf("Failed to update gh stack: %v", err)
 		}
-
-		if err := submitStack(targetRemote, stackLayer.Name, cfg.MyBranch); err != nil {
-			log.Printf("Warning: stack submit failed (branch was pushed and linked): %v", err)
-		} else {
-			fmt.Println("Successfully linked and submitted stacked PR!")
-		}
+		fmt.Println("Successfully added and submitted stacked PR!")
 	}
 
 	fmt.Println("\nOperation completed successfully.")

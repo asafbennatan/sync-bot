@@ -46,7 +46,7 @@ sync-bot https://github.com/redhat-chai-bot/<repo>/tree/<branch>
 | Bot forked from | What happens |
 |-----------------|--------------|
 | Parent default branch | Rebases onto its current tip, pushes to the parent repo's git remote |
-| A branch in your active gh stack | Rebases onto that layer's tip, links into the stack via `gh stack link` |
+| A branch in your active gh stack | Rebases onto that layer's tip, adopts into the stack via `gh stack add`, submits via `gh stack submit` |
 
 ## Options
 
