@@ -11,12 +11,13 @@ import (
 )
 
 type Config struct {
-	BotBranch    string
-	MyBranch     string
-	BotRemoteURL string
-	TargetRemote string
-	BaseBranch   string
-	StackMode    bool
+	BotBranch            string
+	MyBranch             string
+	BotRemoteURL         string
+	TargetRemote         string
+	TargetRemoteExplicit bool
+	BaseBranch           string
+	BaseRepo             string
 }
 
 var cfg Config
@@ -28,6 +29,7 @@ var rootCmd = &cobra.Command{
 	Short: "Sync Chai Bot branch, rewrite author identity, and push to target remote",
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
+		cfg.TargetRemoteExplicit = cmd.Flags().Changed("target-remote")
 		if err := finalizeConfig(args); err != nil {
 			log.Fatal(err)
 		}
@@ -40,9 +42,8 @@ func init() {
 	rootCmd.Flags().StringVarP(&cfg.BotBranch, "bot-branch", "b", "", "Name of the branch created by Chai Bot")
 	rootCmd.Flags().StringVarP(&cfg.MyBranch, "my-branch", "m", "", "Name for your local/target branch (defaults to bot-branch)")
 	rootCmd.Flags().StringVarP(&cfg.BotRemoteURL, "bot-remote", "r", "", "Git SSH/HTTPS URL for Chai Bot's repository")
-	rootCmd.Flags().StringVarP(&cfg.TargetRemote, "target-remote", "t", "origin", "Target remote to push rewritten branch to")
-	rootCmd.Flags().StringVarP(&cfg.BaseBranch, "base", "a", "", "Base branch to rebase against (defaults to upstream default branch)")
-	rootCmd.Flags().BoolVarP(&cfg.StackMode, "stack", "s", false, "Enable gh stack integration for origin repo")
+	rootCmd.Flags().StringVarP(&cfg.TargetRemote, "target-remote", "t", "", "Remote to push to (auto-detected from parent repo when omitted)")
+	rootCmd.Flags().StringVarP(&cfg.BaseBranch, "base", "a", "", "Default branch of the parent repo (auto-detected from bot fork)")
 }
 
 func finalizeConfig(args []string) error {
@@ -65,6 +66,9 @@ func finalizeConfig(args []string) error {
 		if cfg.BaseBranch == "" {
 			cfg.BaseBranch = resolved.BaseBranch
 		}
+		if cfg.BaseRepo == "" {
+			cfg.BaseRepo = resolved.BaseRepo
+		}
 	}
 
 	if cfg.BotRemoteURL == "" || cfg.BotBranch == "" {
@@ -76,10 +80,20 @@ func finalizeConfig(args []string) error {
 	if cfg.MyBranch == "" {
 		cfg.MyBranch = cfg.BotBranch
 	}
+	if err := resolveParentRepo(&cfg); err != nil {
+		return err
+	}
+	if cfg.BaseBranch == "" {
+		cfg.BaseBranch = "main"
+	}
 
 	fmt.Printf("Bot remote: %s\n", cfg.BotRemoteURL)
 	fmt.Printf("Bot branch: %s\n", cfg.BotBranch)
-	fmt.Printf("Base branch: %s\n", cfg.BaseBranch)
+	if cfg.BaseRepo != "" {
+		fmt.Printf("Parent repo: %s (default branch: %s)\n", cfg.BaseRepo, cfg.BaseBranch)
+	} else {
+		fmt.Printf("Base branch: %s\n", cfg.BaseBranch)
+	}
 	return nil
 }
 
@@ -100,61 +114,74 @@ func runCmd(name string, args ...string) (string, error) {
 }
 
 func syncAndRewrite(cfg Config) {
-	botRemoteName := "chai-bot-remote"
-
-	// 1. Add bot remote if missing
-	remotes, _ := runCmd("git", "remote")
-	if !strings.Contains(remotes, botRemoteName) {
-		fmt.Printf("Adding remote '%s'...\n", botRemoteName)
-		if _, err := runCmd("git", "remote", "add", botRemoteName, cfg.BotRemoteURL); err != nil {
-			log.Fatalf("Failed to add remote: %v", err)
-		}
+	botRemoteName, err := ensureBotRemote(cfg.BotRemoteURL)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// 2. Fetch bot branch
+	stackView := loadStackViewOptional()
+
+	// 1. Fetch bot branch
 	fmt.Printf("Fetching branch '%s' from '%s'...\n", cfg.BotBranch, botRemoteName)
 	if _, err := runCmd("git", "fetch", botRemoteName, cfg.BotBranch); err != nil {
 		log.Fatalf("Failed to fetch bot branch: %v", err)
 	}
 
-	// 3. Checkout local branch
+	// 3. Checkout local branch from bot remote
+	botRef := fmt.Sprintf("%s/%s", botRemoteName, cfg.BotBranch)
 	fmt.Printf("Checking out branch '%s'...\n", cfg.MyBranch)
-	if _, err := runCmd("git", "checkout", "-B", cfg.MyBranch, fmt.Sprintf("%s/%s", botRemoteName, cfg.BotBranch)); err != nil {
+	if _, err := runCmd("git", "checkout", "-B", cfg.MyBranch, botRef); err != nil {
 		log.Fatalf("Failed to checkout branch: %v", err)
 	}
-
-	// 4. Fetch base branch & find merge base
-	runCmd("git", "fetch", cfg.TargetRemote, cfg.BaseBranch)
-	baseCommit, err := runCmd("git", "merge-base", fmt.Sprintf("%s/%s", cfg.TargetRemote, cfg.BaseBranch), "HEAD")
-	if err != nil {
-		log.Fatalf("Failed to calculate merge base: %v", err)
+	if _, err := runCmd("git", "reset", "--hard", botRef); err != nil {
+		log.Fatalf("Failed to reset branch to bot remote: %v", err)
 	}
 
-	// 5. Rewrite commit author
-	fmt.Println("Rewriting commit author to match local git user profile...")
+	// 4. Rebase onto the branch the bot forked from
 	rebaseExec := "git commit --amend --reset-author --no-edit"
-	if _, err := runCmd("git", "rebase", baseCommit, "--exec", rebaseExec); err != nil {
-		log.Fatalf("Failed to rewrite commit authors during rebase: %v", err)
+
+	baseRemote, err := resolveBaseRemote(cfg)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	// 6. Push to target remote
-	fmt.Printf("Pushing '%s' to remote '%s'...\n", cfg.MyBranch, cfg.TargetRemote)
-	if _, err := runCmd("git", "push", "-u", cfg.TargetRemote, cfg.MyBranch, "--force-with-lease"); err != nil {
+	baseBranch, forkPoint, err := rebaseBotOntoBase(baseRemote, cfg.BaseBranch, botRef, rebaseExec, stackView)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Rebased onto %s/%s (forked at %s)\n", baseRemote, baseBranch, forkPoint)
+
+	stackLayer, onStack := findStackLayer(stackView, baseBranch)
+	targetRemote, err := resolvePushRemote(cfg, baseRemote, onStack, stackLayer)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if onStack {
+		fmt.Printf("Detected gh stack layer: %s (remote: %s)\n", stackLayer.Name, targetRemote)
+	} else {
+		fmt.Printf("Single-branch mode (remote: %s)\n", targetRemote)
+	}
+
+	// 5. Push to target remote
+	fmt.Printf("Pushing '%s' to remote '%s'...\n", cfg.MyBranch, targetRemote)
+	if _, err := runCmd("git", "push", "-u", targetRemote, cfg.MyBranch, "--force-with-lease"); err != nil {
 		log.Fatalf("Failed to push branch: %v", err)
 	}
 
-	// 7. Handle gh stack workflow
-	if cfg.StackMode {
-		fmt.Println("\nInitializing or updating gh stack on origin...")
-		if _, err := runCmd("gh", "stack", "init", cfg.MyBranch); err != nil {
-			fmt.Println("Stack already initialized or existing layer detected, syncing...")
+	// 6. Link into gh stack when the bot branch forked from a stack layer
+	if onStack {
+		linkArgs := stackLinkArgs(stackView, cfg.MyBranch)
+		fmt.Printf("\nLinking '%s' on top of stack layer %s...\n", cfg.MyBranch, stackLinkRef(stackLayer))
+		ghArgs := append([]string{"stack", "link", "--remote", targetRemote}, linkArgs...)
+		if _, err := runCmd("gh", ghArgs...); err != nil {
+			log.Fatalf("Failed to link branch into gh stack: %v", err)
 		}
 
-		if _, err := runCmd("gh", "stack", "submit", "--auto"); err != nil {
-			log.Printf("Warning: gh stack submit failed or requires manual interaction: %v", err)
-		} else {
-			fmt.Println("Successfully submitted stacked PRs to origin repository!")
+		if _, err := runCmd("gh", "stack", "submit", "--auto", "--remote", targetRemote); err != nil {
+			log.Fatalf("Failed to submit gh stack: %v", err)
 		}
+		fmt.Println("Successfully linked and submitted stacked PR!")
 	}
 
 	fmt.Println("\nOperation completed successfully.")

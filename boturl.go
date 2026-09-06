@@ -68,7 +68,6 @@ func resolveBotURL(raw string) (Config, error) {
 	cfg := Config{
 		BotRemoteURL: botGitURL(info.Owner, info.Repo),
 		BotBranch:    info.Branch,
-		TargetRemote: "origin",
 	}
 
 	repoJSON, err := runCmd("gh", "api", fmt.Sprintf("repos/%s/%s", info.Owner, info.Repo))
@@ -89,6 +88,7 @@ func resolveBotURL(raw string) (Config, error) {
 	}
 
 	if repo.Parent != nil {
+		cfg.BaseRepo = repo.Parent.FullName
 		cfg.BaseBranch = repo.Parent.DefaultBranch
 		if cfg.BaseBranch == "" {
 			parentJSON, err := runCmd("gh", "api", fmt.Sprintf("repos/%s", repo.Parent.FullName))
