@@ -37,12 +37,51 @@ func loadStackView() (stackView, error) {
 	return view, nil
 }
 
-func loadStackViewOptional() stackView {
+func loadStackViewOptional(baseRemote, botRef, defaultBranch string) stackView {
 	view, err := loadStackView()
+	if err == nil && len(view.Branches) > 0 {
+		return view
+	}
+
+	stackBranch := inferStackBaseBranch(baseRemote, botRef, defaultBranch)
+	if stackBranch == "" || stackBranch == defaultBranch {
+		return stackView{}
+	}
+
+	return loadStackViewFromBranch(stackBranch)
+}
+
+func loadStackViewFromBranch(branch string) stackView {
+	if branch == "" {
+		return stackView{}
+	}
+
+	originalRef, err := runCmd("git", "rev-parse", "HEAD")
+	if err != nil {
+		return stackView{}
+	}
+	originalBranch, _ := runCmd("git", "rev-parse", "--abbrev-ref", "HEAD")
+
+	if _, err := runCmd("git", "checkout", branch); err != nil {
+		restoreGitHEAD(originalRef, originalBranch)
+		return stackView{}
+	}
+
+	view, err := loadStackView()
+	restoreGitHEAD(originalRef, originalBranch)
+
 	if err != nil {
 		return stackView{}
 	}
 	return view
+}
+
+func restoreGitHEAD(ref, branch string) {
+	if branch != "" && branch != "HEAD" {
+		runCmd("git", "checkout", branch)
+		return
+	}
+	runCmd("git", "checkout", ref)
 }
 
 func findStackLayer(view stackView, branchName string) (stackBranch, bool) {
@@ -83,6 +122,30 @@ func stackLinkArgs(view stackView, newBranch string) []string {
 	}
 	args = append(args, newBranch)
 	return args
+}
+
+func submitStack(targetRemote, stackLayerBranch, returnBranch string) error {
+	if stackLayerBranch == "" {
+		return fmt.Errorf("no stack layer branch to submit from")
+	}
+
+	originalBranch, _ := runCmd("git", "rev-parse", "--abbrev-ref", "HEAD")
+
+	if _, err := runCmd("git", "checkout", stackLayerBranch); err != nil {
+		return fmt.Errorf("failed to checkout stack layer %q: %w", stackLayerBranch, err)
+	}
+
+	_, err := runCmd("gh", "stack", "submit", "--auto", "--remote", targetRemote)
+
+	if returnBranch != "" && returnBranch != "HEAD" {
+		runCmd("git", "checkout", returnBranch)
+		return err
+	}
+	if originalBranch != "" && originalBranch != "HEAD" {
+		runCmd("git", "checkout", originalBranch)
+	}
+
+	return err
 }
 
 func resolveRebaseTarget(remote, branch string) (string, error) {

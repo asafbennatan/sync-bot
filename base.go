@@ -51,6 +51,12 @@ func detectBotBase(baseRemote, defaultBranch, botRef string, stackView stackView
 		return layer.Name, botTipParent, nil
 	}
 
+	if parentTicket != "" {
+		if branch := findBranchByTicket(baseRemote, parentTicket); branch != "" {
+			return branch, botTipParent, nil
+		}
+	}
+
 	forkPoint, err := botForkPointForLayer(mainRef, botRef)
 	if err != nil {
 		return "", "", err
@@ -92,6 +98,50 @@ func ticketFromCommit(subject string) string {
 		return ""
 	}
 	return match[1]
+}
+
+func findBranchByTicket(remote, ticket string) string {
+	if ticket == "" {
+		return ""
+	}
+
+	prefix := remote + "/"
+	refs, err := runCmd("git", "for-each-ref", fmt.Sprintf("refs/remotes/%s/", remote), "--format=%(refname:short)")
+	if err != nil {
+		return ""
+	}
+
+	for _, ref := range strings.Split(refs, "\n") {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || !strings.HasPrefix(ref, prefix) {
+			continue
+		}
+		branch := strings.TrimPrefix(ref, prefix)
+		if ticketFromBranch(branch) == ticket {
+			return branch
+		}
+	}
+
+	return ""
+}
+
+func inferStackBaseBranch(baseRemote, botRef, defaultBranch string) string {
+	botTipParent, err := runCmd("git", "rev-parse", botRef+"^")
+	if err != nil {
+		return ""
+	}
+
+	parentSubject, err := runCmd("git", "log", "-1", "--format=%s", botTipParent)
+	if err != nil {
+		return ""
+	}
+
+	parentTicket := ticketFromCommit(parentSubject)
+	if branch := findBranchByTicket(baseRemote, parentTicket); branch != "" {
+		return branch
+	}
+
+	return ""
 }
 
 func rebaseBotOntoBase(baseRemote, defaultBranch, botRef, rebaseExec string, stackView stackView) (string, string, error) {

@@ -114,21 +114,27 @@ func runCmd(name string, args ...string) (string, error) {
 }
 
 func syncAndRewrite(cfg Config) {
+	ensureCleanGitState()
+
 	botRemoteName, err := ensureBotRemote(cfg.BotRemoteURL)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	stackView := loadStackViewOptional()
-
-	// 1. Fetch bot branch
 	fmt.Printf("Fetching branch '%s' from '%s'...\n", cfg.BotBranch, botRemoteName)
 	if _, err := runCmd("git", "fetch", botRemoteName, cfg.BotBranch); err != nil {
 		log.Fatalf("Failed to fetch bot branch: %v", err)
 	}
 
-	// 3. Checkout local branch from bot remote
 	botRef := fmt.Sprintf("%s/%s", botRemoteName, cfg.BotBranch)
+
+	baseRemote, err := resolveBaseRemote(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	stackView := loadStackViewOptional(baseRemote, botRef, cfg.BaseBranch)
+
 	fmt.Printf("Checking out branch '%s'...\n", cfg.MyBranch)
 	if _, err := runCmd("git", "checkout", "-B", cfg.MyBranch, botRef); err != nil {
 		log.Fatalf("Failed to checkout branch: %v", err)
@@ -140,11 +146,6 @@ func syncAndRewrite(cfg Config) {
 	// 4. Rebase onto the branch the bot forked from
 	rebaseExec := "git commit --amend --reset-author --no-edit"
 
-	baseRemote, err := resolveBaseRemote(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	baseBranch, forkPoint, err := rebaseBotOntoBase(baseRemote, cfg.BaseBranch, botRef, rebaseExec, stackView)
 	if err != nil {
 		log.Fatal(err)
@@ -152,6 +153,10 @@ func syncAndRewrite(cfg Config) {
 	fmt.Printf("Rebased onto %s/%s (forked at %s)\n", baseRemote, baseBranch, forkPoint)
 
 	stackLayer, onStack := findStackLayer(stackView, baseBranch)
+	if !onStack && baseBranch != cfg.BaseBranch {
+		onStack = true
+		stackLayer = stackBranch{Name: baseBranch}
+	}
 	targetRemote, err := resolvePushRemote(cfg, baseRemote, onStack, stackLayer)
 	if err != nil {
 		log.Fatal(err)
@@ -178,10 +183,11 @@ func syncAndRewrite(cfg Config) {
 			log.Fatalf("Failed to link branch into gh stack: %v", err)
 		}
 
-		if _, err := runCmd("gh", "stack", "submit", "--auto", "--remote", targetRemote); err != nil {
-			log.Fatalf("Failed to submit gh stack: %v", err)
+		if err := submitStack(targetRemote, stackLayer.Name, cfg.MyBranch); err != nil {
+			log.Printf("Warning: stack submit failed (branch was pushed and linked): %v", err)
+		} else {
+			fmt.Println("Successfully linked and submitted stacked PR!")
 		}
-		fmt.Println("Successfully linked and submitted stacked PR!")
 	}
 
 	fmt.Println("\nOperation completed successfully.")
